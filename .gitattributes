@@ -1,0 +1,18 @@
+# Enforce consistent LF line endings
+* text=auto eol=lf
+
+# Code and configuration
+*.py text diff=python
+*.toml text
+*.md text
+*.json text
+*.yml text
+*.yaml text
+
+# Binary assets
+*.blend binary
+*.af binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.zip binary
