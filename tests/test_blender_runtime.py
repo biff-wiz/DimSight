@@ -95,6 +95,92 @@ class BlenderRuntimeTests(unittest.TestCase):
         self.assertTrue(shortened.endswith("..."))
         self.assertEqual(ADDON.overlay.shorten_object_name("Cube"), "Cube")
 
+    def test_corner_arc_arms_split_edge_highlights_and_respect_toggles(self):
+        overlay = ADDON.overlay
+        origin = np.array((1.0, 2.0, 3.0))
+        p_a = origin + np.array((3.0, 0.0, 0.0))
+        p_b = origin + np.array((0.0, 5.0, 0.0))
+        hit = {"mode": "angle", "origin": origin, "p_a": p_a, "p_b": p_b,
+               "len_a": 3.0, "len_b": 5.0}
+        region = SimpleNamespace(width=800, height=600, as_pointer=lambda: 42)
+        rv3d = SimpleNamespace(
+            perspective_matrix=np.eye(4),
+            view_matrix=SimpleNamespace(row=[SimpleNamespace(xyz=(1, 0, 0))]))
+        context = SimpleNamespace(region=region, space_data=SimpleNamespace(region_3d=rv3d))
+        angle_color = (0.2, 0.7, 0.9, 0.35)
+        edge_color = (0.9, 0.4, 0.1, 0.8)
+        props = SimpleNamespace(angle_color=angle_color, edge_color=edge_color,
+                                line_width=4.0, angle_edge_lengths=True,
+                                show_angle_arc=True)
+
+        with (mock.patch.object(overlay, "bpy", SimpleNamespace(context=context)),
+              mock.patch.object(overlay, "_active_props", return_value=props),
+              mock.patch.object(overlay, "selection_has_labels", return_value=False),
+              mock.patch.object(overlay.State, "hit", hit),
+              mock.patch.object(overlay.State, "hover_region", 42),
+              mock.patch.object(overlay, "draw_lines") as lines,
+              mock.patch.object(overlay, "draw_strip") as strips,
+              mock.patch.object(overlay, "draw_fan") as fan,
+              mock.patch.object(overlay, "draw_points") as points,
+              mock.patch.object(overlay, "log_error") as errors,
+              mock.patch.object(overlay.geo, "pixels_per_unit") as pixels):
+            for px_per_unit in (20.0, 80.0):
+                with self.subTest(px_per_unit=px_per_unit):
+                    lines.reset_mock()
+                    strips.reset_mock()
+                    pixels.return_value = px_per_unit
+                    overlay.draw_callback_3d()
+                    errors.assert_not_called()
+                    self.assertEqual(lines.call_count, 4)
+                    self.assertEqual(strips.call_count, 2)
+                    arc = strips.call_args_list[-1].args[0]
+                    expected_radius = min(3.0 * 0.42, 48.0 / px_per_unit)
+                    self.assertAlmostEqual(np.linalg.norm(arc[0] - origin), expected_radius)
+                    self.assertAlmostEqual(np.linalg.norm(arc[-1] - origin), expected_radius)
+                    edge_segments, color, _width, _region = lines.call_args_list[1].args
+                    arm_segments, arm_color, _width, _region = lines.call_args_list[3].args
+                    np.testing.assert_allclose(edge_segments, (arc[0], p_a, arc[-1], p_b))
+                    np.testing.assert_allclose(arm_segments, (origin, arc[0], origin, arc[-1]))
+                    self.assertEqual(color, edge_color)
+                    self.assertEqual(arm_color, angle_color)
+                    self.assertEqual(strips.call_args_list[-1].args[1], angle_color)
+
+            lines.reset_mock()
+            strips.reset_mock()
+            fan.reset_mock()
+            points.reset_mock()
+            props.show_angle_arc = False
+            overlay.draw_callback_3d()
+            self.assertEqual(lines.call_count, 2)
+            np.testing.assert_allclose(lines.call_args_list[1].args[0],
+                                       (origin, p_a, origin, p_b))
+            self.assertEqual(lines.call_args_list[1].args[1], edge_color)
+            strips.assert_not_called()
+            fan.assert_not_called()
+            points.assert_called_once()
+
+            lines.reset_mock()
+            points.reset_mock()
+            props.show_angle_arc = True
+            with mock.patch.object(overlay.geo, "make_arc", return_value=None):
+                overlay.draw_callback_3d()
+            self.assertEqual(lines.call_count, 2)
+            np.testing.assert_allclose(lines.call_args_list[1].args[0],
+                                       (origin, p_a, origin, p_b))
+            strips.assert_not_called()
+            fan.assert_not_called()
+
+            lines.reset_mock()
+            points.reset_mock()
+            props.angle_edge_lengths = False
+            overlay.draw_callback_3d()
+            self.assertEqual(lines.call_count, 2)
+            np.testing.assert_allclose(lines.call_args_list[1].args[0],
+                                       (origin, p_a, origin, p_b))
+            self.assertEqual(lines.call_args_list[1].args[1], angle_color)
+            points.assert_not_called()
+            errors.assert_not_called()
+
     def test_face_angle_fill_tessellation_stays_inside_concave_polygon(self):
         polygon = np.asarray((
             (0, 0, 0), (4, 0, 0), (4, 4, 0), (3, 4, 0),

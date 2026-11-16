@@ -809,29 +809,37 @@ def draw_callback_3d():
                     # Aim for a constant on-screen size, never bigger than the edges allow.
                     arc_radius = min(min(len_a, len_b) * 0.42, ARC_PIXELS / px_per_unit)
 
+            arc = None
+            if props.show_angle_arc:
+                arc = geo.make_arc(origin, (hit["p_a"] - origin) / len_a,
+                                   (hit["p_b"] - origin) / len_b, arc_radius)
+
             if props.angle_edge_lengths:
-                # Full edges highlighted continuously in edge_color (orange) from corner to ends
-                # Ensures the length measurement unambiguously applies to the entire edge
-                edge_lines = [origin, hit["p_a"], origin, hit["p_b"]]
+                # Split at the arc endpoints so translucent angle arms do not blend
+                # with an edge-color stroke underneath them.
+                edge_lines = ([arc[0], hit["p_a"], arc[-1], hit["p_b"]]
+                              if arc is not None else
+                              [origin, hit["p_a"], origin, hit["p_b"]])
                 draw_lines(edge_lines, (*edge_col[:3], edge_col[3] * 0.22), props.line_width + 6.0, region)
                 draw_lines(edge_lines, edge_col, props.line_width, region)
-
-                # Corner apex anchor dot in angle_color (cyan)
-                draw_points([origin], angle_col, props.line_width + 4.0)
             else:
                 # When edge lengths are off, highlight the corner legs in angle_color
                 points = [origin, hit["p_a"], origin, hit["p_b"]]
                 draw_lines(points, (*angle_col[:3], angle_col[3] * 0.22), props.line_width + 6.0, region)
                 draw_lines(points, angle_col, props.line_width, region)
 
-            if props.show_angle_arc:
-                arc = geo.make_arc(origin, (hit["p_a"] - origin) / len_a,
-                                   (hit["p_b"] - origin) / len_b, arc_radius)
+            if arc is not None:
                 # Soft translucent angle wedge inside the corner
                 draw_fan(origin, arc, (*angle_col[:3], min(0.14, float(angle_col[3]) * 0.14)))
+                if props.angle_edge_lengths:
+                    arms = [origin, arc[0], origin, arc[-1]]
+                    draw_lines(arms, (*angle_col[:3], angle_col[3] * 0.22), props.line_width + 4.0, region)
+                    draw_lines(arms, angle_col, max(1.5, props.line_width * 0.8), region)
                 # Crisp angle arc line with glow
                 draw_strip(arc, (*angle_col[:3], angle_col[3] * 0.22), props.line_width + 4.0, region)
                 draw_strip(arc, angle_col, max(1.5, props.line_width * 0.8), region)
+            if props.angle_edge_lengths:
+                draw_points([origin], angle_col, props.line_width + 4.0)
     except Exception:
         log_error()
 
