@@ -1,4 +1,4 @@
-"""DimSight: hover to measure edge lengths and vertex angles in the 3D viewport."""
+"""DimSight: hover to inspect mesh dimensions, corner angles, and face bends."""
 
 bl_info = {
     "name": "DimSight",
@@ -6,7 +6,7 @@ bl_info = {
     "version": (1, 2, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DimSight",
-    "description": "Hover to measure edge lengths and vertex angles in the 3D viewport.",
+    "description": "Hover to inspect mesh lengths, corner angles, and face bends in the 3D viewport.",
     "category": "3D View",
 }
 

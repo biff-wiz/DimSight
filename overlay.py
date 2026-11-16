@@ -12,6 +12,7 @@ from bpy.app.handlers import persistent
 from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
+from mathutils.geometry import tessellate_polygon
 
 from . import geometry as geo
 from . import meshdata
@@ -74,6 +75,31 @@ def selection_wanted(props):
     return mode == "ACTIVE" or (mode == "HOLD" and State.peek)
 
 
+def selection_has_labels(context, props):
+    if not selection_wanted(props) or context.mode != "EDIT_MESH":
+        return False
+    selected = get_selection(context, props)
+    display = props.chain_display
+    if display in {"INDIVIDUAL", "BOTH"}:
+        if props.show_edge_length and len(selected.edge_len):
+            return True
+        if props.show_vertex_angle and len(selected.corner_angle):
+            return True
+    if display == "CHAINS" and props.show_vertex_angle and len(selected.corner_angle):
+        deflections = np.abs(np.pi - selected.corner_angle)
+        if np.any(deflections > props.max_curve_angle):
+            return True
+    if display in {"CHAINS", "BOTH"} and selected.chains:
+        for chain in selected.chains:
+            if props.show_edge_length:
+                return True
+            bend = chain["bend_angle"]
+            if (props.show_vertex_angle and bend is not None
+                    and bend > math.radians(0.5)):
+                return True
+    return False
+
+
 def xray_active(space):
     shading = getattr(space, "shading", None)
     if shading is None:
@@ -118,6 +144,41 @@ def format_length(length_bu, scene, decimals, show_units):
 
 def format_angle(radians, decimals):
     return f"{math.degrees(radians):.{decimals}f}°"
+
+
+def shorten_object_name(name, limit=36):
+    return name if len(name) <= limit else name[:limit - 3] + "..."
+
+
+def segment_label_anchor(p0, p1, persp, width, height, margin_x=50.0, margin_y=35.0):
+    clipped = geo.clip_segment_to_viewport(
+        p0, p1, persp, width, height, margin_x=margin_x, margin_y=margin_y)
+    if clipped is None:
+        return None
+    return (clipped[0] + clipped[1]) * 0.5
+
+
+def format_chain_label(chain, scene, decimals, units, show_lengths, show_angles):
+    """Build only the chain measurements enabled by their independent toggles."""
+    parts = []
+    if chain["is_loop"]:
+        if show_lengths:
+            parts.append(f"Loop: {format_length(chain['total_len'], scene, decimals, units)}")
+    elif chain["num_edges"] == 1:
+        if show_lengths:
+            parts.append(format_length(chain["total_len"], scene, decimals, units))
+    else:
+        if show_lengths:
+            parts.append(format_length(chain["total_len"], scene, decimals, units))
+        bend_angle = chain["bend_angle"]
+        if show_angles and bend_angle is not None and bend_angle > math.radians(0.5):
+            parts.append(f"bend {format_angle(bend_angle, decimals)}")
+    if not parts:
+        return None
+    if chain["num_edges"] == 1:
+        return parts[0]
+    kind = "Loop" if chain["is_loop"] else "Chain"
+    return f"{kind}: {' · '.join(parts)} ({chain['num_edges']} edges)"
 
 
 def measurable_objects(context, props):
@@ -219,24 +280,26 @@ class Occlusion:
 # ---------------------------------------------------------------------------
 
 def compute_hover(context, region, rv3d, space, mouse, props):
-    # When selection measurements are actively displayed in Edit Mode,
-    # disable mouse hover so it never conflicts with or duplicates the selection.
-    if selection_wanted(props) and context.mode == "EDIT_MESH":
-        sel = get_selection(context, props)
-        if len(sel.edge_len) > 0 or len(sel.chains) > 0 or len(sel.corner_angle) > 0:
-            return None
+    # Keep hover picking only when a held Object Name needs to identify the cursor target.
+    if (selection_has_labels(context, props)
+            and not (props.show_object_name and State.peek)):
+        return None
 
     entries = []
     use_mods = getattr(props, "use_modifiers", True)
     for obj in measurable_objects(context, props):
-        topo = meshdata.get_topo(obj, State.generation, props.max_vertices, use_modifiers=use_mods)
+        topo = meshdata.get_topo(
+            obj, State.generation, props.max_vertices, use_modifiers=use_mods,
+            include_faces=props.show_face_angle)
         if topo is None:
             continue
         hide_e = topo.hide_e
-        if obj.mode == "EDIT" and selection_wanted(props):
+        if (obj.mode == "EDIT" and selection_wanted(props)
+                and not (props.show_object_name and State.peek)):
             hide_e = hide_e | topo.sel_e
         entries.append(geo.Entry(topo.co, topo.edges, topo.hide_v, hide_e,
-                                 np.array(obj.matrix_world, dtype=np.float64), obj))
+                                 np.array(obj.matrix_world, dtype=np.float64), obj,
+                                 topo.faces, topo.edge_faces))
     if not entries:
         return None
     occlusion = Occlusion(context, region, rv3d, space, props)
@@ -245,19 +308,34 @@ def compute_hover(context, region, rv3d, space, mouse, props):
         region.width, region.height, mouse,
         float(props.hover_threshold), props.angle_endpoint_zone / 100.0,
         props.show_vertex_angle, props.show_edge_length, occlusion.visible,
-        prev_key=(State.hit or {}).get("pair_key"))
+        prev_key=(State.hit or {}).get("pair_key"),
+        want_face_angle=props.show_face_angle,
+        want_object_name=props.show_object_name and State.peek)
 
 
 def update_hover(context, event):
     update_hover_at(context, event.mouse_x, event.mouse_y)
 
 
-def refresh_hover(context):
+def refresh_hover(context=None):
     """Re-pick under a stationary pointer after the view moved (wheel zoom, numpad
     views, the end of an orbit): no mouse event arrives in those cases."""
+    context = context or bpy.context
     pos = State.mouse_win
     if pos is not None:
         update_hover_at(context, pos[0], pos[1])
+
+
+def _hover_settings_key(context, props):
+    active = context.view_layer.objects.active
+    return (
+        props.measure_scope, props.max_vertices, props.hover_threshold,
+        props.angle_endpoint_zone, props.show_vertex_angle, props.show_edge_length,
+        props.show_face_angle, props.show_object_name, props.use_modifiers,
+        props.include_occluded_geometry, props.selected_display, context.mode,
+        State.peek,
+        active.as_pointer() if active is not None else None,
+    )
 
 
 def update_hover_at(context, mx, my):
@@ -274,7 +352,8 @@ def update_hover_at(context, mx, my):
     rv3d = space.region_3d
     mouse = (mx - region.x, my - region.y)
     marker = (mouse, State.generation, region.as_pointer(),
-              np.array(rv3d.perspective_matrix, dtype=np.float64).tobytes())
+              np.array(rv3d.perspective_matrix, dtype=np.float64).tobytes(),
+              _hover_settings_key(context, props))
     if marker == State.last_mouse:
         return
     State.last_mouse = marker
@@ -292,7 +371,10 @@ def update_hover_at(context, mx, my):
 # ---------------------------------------------------------------------------
 
 def get_selection(context, props):
-    key = (State.generation, props.measure_scope, props.max_vertices, props.max_labels, props.chain_display, props.max_curve_angle)
+    active = context.view_layer.objects.active
+    key = (State.generation, props.measure_scope, props.max_vertices, props.max_labels,
+           props.chain_display, props.max_curve_angle,
+           active.as_pointer() if active is not None else None)
     cached = State.sel_cache
     if cached is not None and cached[0] == key:
         return cached[1]
@@ -525,6 +607,32 @@ def draw_fan(origin, arc_points, color):
     gpu.state.depth_test_set("LESS_EQUAL")
 
 
+def face_fill_triangles(points):
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if len(points) < 3:
+        return np.empty((0, 3, 3), dtype=np.float32)
+    polygon = [Vector(point) for point in points]
+    triangles = tessellate_polygon([polygon])
+    return np.asarray(
+        [points[np.asarray(triangle, dtype=np.int64)] for triangle in triangles],
+        dtype=np.float32).reshape(-1, 3, 3)
+
+
+def draw_face_fill(points, color):
+    triangles = face_fill_triangles(points)
+    if not len(triangles):
+        return
+    shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+    batch = batch_for_shader(shader, "TRIS", {"pos": triangles.reshape(-1, 3)})
+    gpu.state.blend_set("ALPHA")
+    gpu.state.depth_test_set("NONE")
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.blend_set("NONE")
+    gpu.state.depth_test_set("LESS_EQUAL")
+
+
 def draw_points(coords, color, size):
     if coords is None or len(coords) == 0:
         return
@@ -577,16 +685,41 @@ def draw_lines_smooth(coords, colors, width, region):
     gpu.state.depth_test_set("LESS_EQUAL")
 
 
-def clamp_pill_to_viewport(screen_xy, text_str, width, height, size=13, margin=8.0):
-    font = 0
-    blf.size(font, size)
-    w, h = blf.dimensions(font, text_str)
-    pad_x, pad_y = 8.0, 5.0
-    half_w = w * 0.5 + pad_x
-    half_h = h * 0.5 + pad_y
-    cx = max(half_w + margin, min(float(width) - half_w - margin, float(screen_xy[0])))
-    cy = max(half_h + margin, min(float(height) - half_h - margin, float(screen_xy[1])))
-    return np.array([cx, cy], dtype=np.float64)
+def layout_pills(requests, width, height, size, measure_text=None):
+    """Place labels by priority without overlaps, clamping each candidate on screen."""
+    if measure_text is None:
+        def measure_text(label):
+            blf.size(0, size)
+            return blf.dimensions(0, label)
+
+    placed = []
+    occupied = []
+    ordered = sorted(enumerate(requests), key=lambda item: (-item[1]["priority"], item[0]))
+    for order, request in ordered:
+        label = request["text"]
+        text_width, text_height = measure_text(label)
+        half_w, half_h = text_width * 0.5 + 8.0, text_height * 0.5 + 5.0
+        if half_w * 2 + 16.0 > width or half_h * 2 + 16.0 > height:
+            continue
+        anchor = np.asarray(request["anchor"], dtype=np.float64)
+        offsets = request["offsets"]
+        selected = None
+        for dx, dy in offsets:
+            cx = max(half_w + 8.0, min(width - half_w - 8.0, anchor[0] + dx))
+            cy = max(half_h + 8.0, min(height - half_h - 8.0, anchor[1] + dy))
+            box = (cx - half_w, cy - half_h, cx + half_w, cy + half_h)
+            overlaps = any(
+                not (box[2] + 4.0 <= other[0] or box[0] - 4.0 >= other[2]
+                     or box[3] + 4.0 <= other[1] or box[1] - 4.0 >= other[3])
+                for other in occupied)
+            if not overlaps:
+                selected = np.array((cx, cy), dtype=np.float64)
+                occupied.append(box)
+                break
+        if selected is not None:
+            placed.append((order, label, selected))
+    placed.sort(key=lambda item: item[0])
+    return [(label, center) for _order, label, center in placed]
 
 
 def draw_pill(text, x, y, size, text_color, bg_color):
@@ -639,16 +772,26 @@ def draw_callback_3d():
         return
     if region.as_pointer() != State.hover_region:
         return   # the hover belongs to another viewport
-    if selection_wanted(props) and context.mode == "EDIT_MESH":
-        sel = get_selection(context, props)
-        if len(sel.edge_len) > 0 or len(sel.chains) > 0 or len(sel.corner_angle) > 0:
-            return
+    if selection_has_labels(context, props):
+        return
     try:
         if hit["mode"] == "edge":
             colour = tuple(props.edge_color)
             points = [hit["p0"], hit["p1"]]
             draw_lines(points, (*colour[:3], colour[3] * 0.22), props.line_width + 6.0, region)
             draw_lines(points, colour, props.line_width, region)
+        elif hit["mode"] == "face_angle":
+            angle_col = tuple(props.angle_color)
+            for index, polygon in enumerate(hit["faces"]):
+                points = np.asarray(polygon, dtype=np.float64)
+                tint = (*angle_col[:3], min(0.10, angle_col[3] * (0.08 if index == 0 else 0.10)))
+                draw_face_fill(points, tint)
+                draw_strip(np.concatenate((points, points[:1]), axis=0),
+                           (*angle_col[:3], angle_col[3] * 0.35), props.line_width, region)
+            edge_col = tuple(props.edge_color)
+            points = [hit["p0"], hit["p1"]]
+            draw_lines(points, (*edge_col[:3], edge_col[3] * 0.22), props.line_width + 6.0, region)
+            draw_lines(points, edge_col, props.line_width, region)
         elif hit["mode"] == "angle":
             origin = hit["origin"]
             angle_col = tuple(props.angle_color)
@@ -711,26 +854,47 @@ def _draw_2d(context, props, region, rv3d, space):
     text, bg, size = tuple(props.text_color), tuple(props.text_bg_color), int(props.text_size)
     decimals, units = props.decimal_places, props.show_units
     W, H = region.width, region.height
+    label_requests = []
+    warnings = []
+    default_offsets = (
+        (0.0, 0.0), (0.0, 20.0), (0.0, -20.0),
+        (20.0, 0.0), (-20.0, 0.0), (20.0, 20.0), (-20.0, 20.0),
+        (20.0, -20.0), (-20.0, -20.0), (0.0, 40.0), (0.0, -40.0),
+    )
 
-    def pill(label, screen_xy, lift=0):
-        pos = clamp_pill_to_viewport((screen_xy[0], screen_xy[1] + lift), label, W, H, size=size, margin=8.0)
-        draw_pill(label, pos[0], pos[1], size, text, bg)
+    def pill(label, screen_xy, lift=0, priority=0, offsets=None):
+        label_requests.append({
+            "text": label,
+            "anchor": (float(screen_xy[0]), float(screen_xy[1] + lift)),
+            "offsets": offsets or default_offsets,
+            "priority": priority,
+        })
 
     def project_one(point):
         s, _w, ok = geo.project(np.asarray(point)[None, :], persp, W, H)
         return s[0] if ok[0] else None
 
     # Selected geometry (edit mode only)
-    note = ""
     if selection_wanted(props) and context.mode == "EDIT_MESH":
         selection = get_selection(context, props)
-        if (props.show_edge_length and selection.edges_over) or \
-                (props.show_vertex_angle and selection.corners_over) or \
-                selection.chains_over:
-            note = f"  ·  selection exceeds Max Labels ({props.max_labels})"
+        suppressed = []
+        if (props.show_edge_length and props.chain_display in {"INDIVIDUAL", "BOTH"}
+                and selection.edges_over):
+            suppressed.append("edge-length")
+        if props.show_vertex_angle and selection.corners_over:
+            suppressed.append("corner-angle")
+        if (props.chain_display in {"CHAINS", "BOTH"}
+                and (props.show_edge_length or props.show_vertex_angle)
+                and selection.chains_over):
+            suppressed.append("chain")
+        if suppressed:
+            warnings.append(
+                f"Max Labels ({props.max_labels}) suppressed selected "
+                f"{', '.join(suppressed)} labels")
         key = (persp.tobytes(), State.generation, W, H, props.include_occluded_geometry,
                props.show_edge_length, props.show_vertex_angle, props.measure_scope,
-               props.chain_display, props.max_curve_angle)
+               props.chain_display, props.max_curve_angle, props.max_labels,
+               props.max_vertices)
         ptr = region.as_pointer()
         cached = State.vis_cache.get(ptr)
         if cached is None or cached[0] != key:
@@ -772,49 +936,48 @@ def _draw_2d(context, props, region, rv3d, space):
         _key, edge_scr, edge_ok, corner_scr, corner_ok, corner_angles_subset, chain_scr, chain_ok = cached
 
         for i in np.nonzero(edge_ok)[0]:
-            pill(format_length(float(selection.edge_len[i]), scene, decimals, units), edge_scr[i], 16)
+            pill(format_length(float(selection.edge_len[i]), scene, decimals, units),
+                 edge_scr[i], 16, priority=30)
         for i in np.nonzero(corner_ok)[0]:
-            pill(format_angle(float(corner_angles_subset[i]), decimals), corner_scr[i], 22)
+            pill(format_angle(float(corner_angles_subset[i]), decimals),
+                 corner_scr[i], 22, priority=40)
 
         for i in np.nonzero(chain_ok)[0]:
             chain = selection.chains[i]
-            total_len_str = format_length(chain["total_len"], scene, decimals, units)
-            if chain["is_loop"]:
-                label = f"Loop: {total_len_str} ({chain['num_edges']} edges)"
-            elif chain["num_edges"] == 1:
-                label = total_len_str
-            else:
-                bend_ang = chain["bend_angle"]
-                if bend_ang is not None and bend_ang > math.radians(0.5):
-                    ang_str = format_angle(bend_ang, decimals)
-                    label = f"Curve: {total_len_str} · {ang_str} ({chain['num_edges']} edges)"
-                else:
-                    label = f"Line: {total_len_str} ({chain['num_edges']} edges)"
-            pill(label, chain_scr[i], 20)
+            label = format_chain_label(
+                chain, scene, decimals, units,
+                props.show_edge_length, props.show_vertex_angle)
+            if label:
+                pill(label, chain_scr[i], 20, priority=25)
 
     # Hover
-    hit = State.hit
-    if hit is not None and region.as_pointer() == State.hover_region:
-        if selection_wanted(props) and context.mode == "EDIT_MESH":
-            sel = get_selection(context, props)
-            if len(sel.edge_len) > 0 or len(sel.chains) > 0 or len(sel.corner_angle) > 0:
-                hit = None
-        if hit is not None and hit["mode"] == "edge":
+    hover_hit = State.hit if region.as_pointer() == State.hover_region else None
+    hit = hover_hit
+    if selection_has_labels(context, props):
+        hit = None
+    if hit is not None:
+        if hit["mode"] == "edge":
             p0, p1 = hit["p0"], hit["p1"]
-            clipped = geo.clip_segment_to_viewport(p0, p1, persp, W, H, margin_x=50.0, margin_y=35.0)
-            if clipped is not None:
-                v0, v1, _u1, _u2 = clipped
-                vis_mid = (v0 + v1) * 0.5
-                pill(format_length(hit["length"], scene, decimals, units), vis_mid, 16)
-            else:
-                mid = project_one((p0 + p1) * 0.5)
-                if mid is not None:
-                    pill(format_length(hit["length"], scene, decimals, units), mid, 16)
+            anchor = segment_label_anchor(p0, p1, persp, W, H)
+            if anchor is not None:
+                pill(format_length(hit["length"], scene, decimals, units),
+                     anchor, 16, priority=90)
+        elif hit["mode"] == "face_angle":
+            anchor = segment_label_anchor(
+                hit["p0"], hit["p1"], persp, W, H)
+            if anchor is not None:
+                face_label = (
+                    f"Face bend (flat 0°, perp. 90°): "
+                    f"{format_angle(hit['angle'], decimals)}")
+                pill(face_label, anchor, -16, priority=110)
+                if props.show_edge_length:
+                    pill(format_length(hit["length"], scene, decimals, units),
+                         anchor, 16, priority=100)
         elif hit["mode"] == "angle":
             origin_2d = project_one(hit["origin"])
             if origin_2d is not None:
                 if not props.angle_edge_lengths:
-                    pill(format_angle(hit["angle"], decimals), origin_2d, 22)
+                    pill(format_angle(hit["angle"], decimals), origin_2d, 22, priority=110)
                 else:
                     ang_str = format_angle(hit["angle"], decimals)
                     len_a_str = format_length(hit["len_a"], scene, decimals, units)
@@ -872,58 +1035,45 @@ def _draw_2d(context, props, region, rv3d, space):
                     pos_a = pos_a_base + n_a * 12.0
                     pos_b = pos_b_base + n_b * 12.0
 
-                    pos_ang = clamp_pill_to_viewport(pos_ang, ang_str, W, H, size=size)
-                    pos_a = clamp_pill_to_viewport(pos_a, len_a_str, W, H, size=size)
-                    pos_b = clamp_pill_to_viewport(pos_b, len_b_str, W, H, size=size)
+                    pill(ang_str, pos_ang, 0, priority=110)
+                    pill(len_a_str, pos_a, 0, priority=100)
+                    pill(len_b_str, pos_b, 0, priority=100)
 
-                    def get_box(center, text_str):
-                        blf.size(0, size)
-                        w, h = blf.dimensions(0, text_str)
-                        pad_x, pad_y = 8, 5
-                        return (center[0] - w * 0.5 - pad_x, center[1] - h * 0.5 - pad_y,
-                                center[0] + w * 0.5 + pad_x, center[1] + h * 0.5 + pad_y)
+    if State.peek and props.show_object_name and hover_hit is not None:
+        object_name = hover_hit.get("obj_name", "")
+        if object_name:
+            object_name = shorten_object_name(object_name)
+            if State.mouse_win is not None:
+                cursor = (State.mouse_win[0] - region.x, State.mouse_win[1] - region.y)
+                pill(
+                    object_name, cursor, priority=140,
+                    offsets=((22, 18), (22, -18), (-22, 18), (-22, -18),
+                             (0, 26), (0, -26), (34, 0), (-34, 0)))
 
-                    def overlaps(b1, b2, pad=6.0):
-                        return not (b1[2] + pad < b2[0] or b1[0] - pad > b2[2] or
-                                    b1[3] + pad < b2[1] or b1[1] - pad > b2[3])
+    warnings.extend(meshdata.get_issues(measurable_objects(context, props)))
+    placed = layout_pills(label_requests, W, H, size)
+    if len(placed) < len(label_requests):
+        warnings.append(
+            f"{len(label_requests) - len(placed)} measurement labels hidden to prevent overlap")
+    for label, center in placed:
+        draw_pill(label, center[0], center[1], size, text, bg)
 
-                    box_ang = get_box(pos_ang, ang_str)
-                    box_a = get_box(pos_a, len_a_str)
-                    box_b = get_box(pos_b, len_b_str)
-
-                    iters = 0
-                    while overlaps(box_a, box_ang) and iters < 25:
-                        pos_a += u_oa * 6.0
-                        pos_a = clamp_pill_to_viewport(pos_a, len_a_str, W, H, size=size)
-                        box_a = get_box(pos_a, len_a_str)
-                        iters += 1
-
-                    iters = 0
-                    while overlaps(box_b, box_ang) and iters < 25:
-                        pos_b += u_ob * 6.0
-                        pos_b = clamp_pill_to_viewport(pos_b, len_b_str, W, H, size=size)
-                        box_b = get_box(pos_b, len_b_str)
-                        iters += 1
-
-                    iters = 0
-                    while overlaps(box_a, box_b) and iters < 25:
-                        pos_a += u_oa * 6.0
-                        pos_b += u_ob * 6.0
-                        pos_a = clamp_pill_to_viewport(pos_a, len_a_str, W, H, size=size)
-                        pos_b = clamp_pill_to_viewport(pos_b, len_b_str, W, H, size=size)
-                        box_a = get_box(pos_a, len_a_str)
-                        box_b = get_box(pos_b, len_b_str)
-                        iters += 1
-
-                    pill(ang_str, pos_ang, 0)
-                    pill(len_a_str, pos_a, 0)
-                    pill(len_b_str, pos_b, 0)
+    if warnings:
+        unique_warnings = list(dict.fromkeys(warnings))
+        shown = unique_warnings[:3]
+        if len(unique_warnings) > len(shown):
+            shown.append(f"...and {len(unique_warnings) - len(shown)} more")
+        blf.size(0, 11)
+        blf.color(0, 1.0, 0.45, 0.18, 0.95)
+        for index, warning in enumerate(shown):
+            blf.position(0, 12, H - 40 - index * 16, 0)
+            blf.draw(0, warning)
 
     if props.show_status_badge:
         blf.size(0, 11)
         blf.color(0, 1.0, 0.54, 0.24, 0.9)
         blf.position(0, 12, H - 22, 0)
-        blf.draw(0, "DIMSIGHT" + note)
+        blf.draw(0, "DIMSIGHT")
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +1113,7 @@ def _start_modal():
 
 def sync():
     """Bring draw handlers and the modal session in line with the current settings."""
+    State.last_mouse = None
     scene = getattr(bpy.context, "scene", None)
     props = getattr(scene, "dimsight", None)
     if props is not None and overlay_active(props):
@@ -1014,7 +1165,7 @@ def _on_load(*_args):
             if prefs is not None and hasattr(scene, "dimsight"):
                 copy_settings(prefs, scene.dimsight)
         except Exception:
-            pass
+            log_error()
     bpy.app.timers.register(_restart_after_load, first_interval=0.3)
 
 
