@@ -3,7 +3,7 @@ schema_version = "1.0.0"
 id = "dimsight"
 version = "1.2.2"
 name = "DimSight"
-tagline = "Hover to measure edge lengths and vertex angles"
+tagline = "Hover to inspect mesh dimensions and angles"
 maintainer = "biff-wiz"
 type = "add-on"
 

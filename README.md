@@ -5,39 +5,39 @@
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]()
 
-> **Real-time, zero-overhead HUD dimensioning and angle inspection for the Blender 3D Viewport.**
+> **Real-time, hover-driven dimensioning and angle inspection for the Blender 3D Viewport.**
 
-DimSight brings effortless CAD-like dimensioning directly into Blender. Simply hover over edges or vertices to immediately inspect exact lengths, vertex angles, and connected edge paths with clean, non-intrusive GPU-rendered HUD badges.
+DimSight brings CAD-like dimensioning directly into Blender. Hover over mesh edges or vertices to inspect lengths, corner angles, face bends, and selected edge chains in the 3D Viewport.
 
-No ruler objects to delete. No scene clutter. No undo stack pollution.
+No measurement objects to create or remove; DimSight settings are stored with their scene in the blend file.
 
 ---
 
 ## Features
 
 ### 📏 Real-Time Hover Dimensioning
-- **Instant Edge Lengths**: Hover over any edge in Object or Edit Mode to see its live length formatted in your scene's chosen measurement units.
-- **Corner Apex Angles**: Hover near vertices to reveal the internal or external angle formed by adjacent edges, accompanied by a clean visual arc.
-- **Combined Angle & Edge Lengths**: When inspecting a corner, view the apex angle and both adjacent edge lengths simultaneously with intelligent anti-overlap positioning.
+- **Edge Lengths**: Hover over a mesh edge in Object or Edit Mode to see its length in scene units, or in raw Blender units when scene-unit formatting is off.
+- **Corner Angles**: Hover near a vertex or edge endpoint to measure the angle between two connected edges.
+- **Face Bend Angles**: Optionally measure the angle between two face planes across a shared edge. A flat surface is **0°** and perpendicular faces are **90°**; boundary and non-manifold edges have no face-angle value. The adjacent faces are highlighted.
+- **Object Names**: Optionally show the hovered object's Outliner name beside the cursor while holding the shortcut. Long names are shortened.
+- **Adjacent Edge Lengths**: Independently show both connected edge lengths with Corner Angle.
 - **Multi-Edge Corner Intelligence**: Intelligently resolves vertices connected to 3 or more edges (e.g. cube corners, poles). DimSight calculates the approach vector of your cursor in 2D screen space and highlights the exact face/edges facing your pointer.
 
-### 🔗 Curve, Loop & Chain Analytics (Edit Mode)
-- **Continuous Path Analysis**: Select any sequence of connected edges in Edit Mode to see total arc length, edge count, and deflection angles.
-- **Loop vs. Curve Detection**: Distinguishes closed loops from open curves and straight polylines.
+### 🔗 Connected Mesh Chain Analytics (Edit Mode)
+- **Continuous Path Analysis**: Select mesh edges in Edit Mode to see connected-chain lengths, edge counts, and bend angles.
+- **Loop Classification**: Distinguishes closed loops from open connected mesh chains and straight polylines; Curve objects are not measured.
 - **Corner Discontinuity Splitting**: Automatically differentiates smooth curves from sharp corners (> 45° threshold by default, configurable).
 
 ### 👁️ Occlusion-Aware & Camera-Ready
-- **Smart Line-of-Sight Raycasting**: Deep ray-casting ensures hidden back-facing edges and occluded interior geometry are never falsely detected.
-- **Full Viewport Support**: Operates seamlessly in Perspective, Orthographic, Camera View (`Numpad 0`), and Wireframe/X-Ray modes.
-- **Base Cage vs. Evaluated Modifiers**: Toggle whether measurements reflect base un-modified polygon geometry or geometry after modifier evaluation (Subdivision Surface, Booleans, Solidify, Wireframe, etc.).
+- **Occlusion Controls**: Choose whether hover measurements include geometry behind visible surfaces. Blender-hidden geometry remains excluded; X-Ray and wireframe modes already measure through surfaces.
+- **Base Cage vs. Evaluated Modifiers**: The modifier option applies to hover measurements. Edit Mode selection measurements always use the base mesh. If modifier evaluation fails or exceeds the vertex limit, the object is skipped with a warning instead of silently switching geometry.
 
 ### 🪟 Viewport-Clamped HUD Badges
-- **Zero Viewport Drift**: When an edge or corner recedes outside your current camera view, labels smoothly clamp to the viewport margins rather than vanishing off-screen.
+- **Collision-aware HUD Labels**: Labels are clamped to the viewport and placed with shared collision avoidance. When the viewport cannot fit every label, lower-priority labels are omitted rather than drawn over one another.
 - **Adaptive Contrast & Styling**: Fully customizable text, badges, line weights, and edge/angle colors.
 
 ### ⚡ Non-Destructive & Pure GPU Shaders
-- **Zero Scene Footprint**: DimSight draws exclusively using Blender's modern GPU overlay pipelines (`POST_VIEW` and `POST_PIXEL`).
-- **Clean Blend Files**: Absolutely nothing is written into your blend file, vertex groups, or scene graph, keeping your project files clean and your undo history pristine.
+- **No Added Scene Geometry**: DimSight does not add measurement objects or geometry to the scene. Per-scene settings are stored in the blend file; global defaults are stored in Blender preferences.
 
 ---
 
@@ -68,9 +68,9 @@ No ruler objects to delete. No scene clutter. No undo stack pollution.
 |---|---|
 | **Hold `D`** *(Default)* | Hold to inspect dimensions under the mouse cursor. Release to hide. |
 | **Always On** | Toggle in the N-panel to keep DimSight active continuously without holding a key. |
-| **Selection Mode** | In Edit Mode, selected edges automatically display length or curve chains. |
+| **Selection Mode** | In Edit Mode, selected mesh edges can show individual measurements, connected chains, or both. |
 
-> 💡 *The hold key can be rebound to any keyboard key (e.g. `Shift`, `Alt`, `Space`, function keys) from **3D View > Sidebar > DimSight** or **Preferences**.*
+> 💡 *The hold shortcut can be rebound from **3D View > Sidebar > DimSight** or **Preferences**. It is installed in Blender's 3D View, Object Mode, and Mesh keymaps; existing user keymaps are not changed, and possible conflicts are reported.*
 
 ### 🛠️ Sidebar (N-Panel) Controls
 
@@ -78,18 +78,20 @@ Open the 3D Viewport sidebar by pressing <kbd>N</kbd> and navigate to the **DimS
 
 | Setting | Description |
 |---|---|
-| **Measure Scope** | Measure all visible objects or restrict strictly to the active object. |
-| **Edge Length** | Toggle edge length dimension pills. |
-| **Vertex Angle** | Toggle corner angle dimension pills and arcs. |
-| **Angle Edge Lengths** | Show adjacent edge lengths simultaneously when hovering near a corner. |
-| **Show Angle Arc** | Display the curved visual arc and wedge highlight inside corners. |
-| **Angle End Zone** | Distance from vertex (0–50%) where edge hover transitions into corner angle hover. |
-| **Include Occluded** | Enable to measure through solid surfaces (useful for x-ray/transparent workflows). |
-| **Use Modifiers** | Toggle between measuring original mesh geometry vs post-modifier geometry. |
-| **Selection Display** | Display selected geometry as `Individual` edges, continuous `Chains`, or `Both`. |
-| **Max Curve Angle** | Deflection threshold beyond which connected edges count as sharp corners. |
-| **Units & Decimals** | Choose metric, imperial, or raw unit formatting and configure precision (1–4 decimals). |
-| **Save as Default** | Store your current settings as the global default for all future Blender sessions. |
+| **Object Name** | Show the hovered object's Outliner name beside the cursor while holding the shortcut. |
+| **Edge Length / Corner Angle / Face Angle** | Choose which hover measurements are shown. Face bend angle is flat at 0° and perpendicular at 90° and requires exactly two adjacent faces. |
+| **Adjacent Edge Lengths** | With Corner Angle enabled, independently show the two connected edge lengths. This does not depend on the Edge Length toggle. |
+| **Objects** | Measure all visible mesh objects or only the active mesh object. |
+| **Use Modifiers** | Use evaluated modifier geometry for hover measurements only; Edit Mode selection uses base-mesh geometry. |
+| **Measure Through Surfaces** | Include geometry occluded by other surfaces. Blender-hidden geometry remains excluded; X-Ray and wireframe already override occlusion. |
+| **Show Measurements in Edit Mode Selection** | Choose when selected mesh measurements are visible. This setting is available outside Edit Mode and applies when editing a mesh. |
+| **Display As** | Show selected mesh edges as `Individual Edges`, `Connected Chains`, or `Both`; this does not measure Curve objects. |
+| **Chain Split Angle** | A direction change greater than this angle starts a new connected chain. |
+| **Use Scene Units** | Format lengths with the scene unit system; when off, values use raw Blender units without conversion. |
+| **Corner Detection Zone** | Screen-space percentage of an edge near each endpoint reserved for Corner Angle detection (5–25%). |
+| **Decimals** | Display precision from 0 to 8 decimal places. |
+| **Advanced limits** | Configure hover radius, label limit, and mesh vertex limit. Label-limit suppression applies to the whole affected category. |
+| **Defaults** | Save scene settings to Blender preferences, apply saved preferences to the current scene, or reset only the current scene. Reset leaves Always On and the shortcut unchanged. |
 
 ---
 
@@ -103,7 +105,9 @@ DimSight/
 ├── assets/
 │   └── branding/              # Source logo (.af) and branding project (.blend)
 ├── tests/
-│   └── DimSightTest.blend     # Multi-case test scene for angles, curves, and occlusion
+│   ├── DimSightTest.blend     # Multi-case test scene for angles, chains, and occlusion
+│   ├── test_geometry.py       # Pure NumPy geometry regression tests
+│   └── test_blender_runtime.py # Blender registration, UI-layout, and mesh-data tests
 ├── __init__.py                # Add-on entrypoint, lifecycle, and bl_info registration
 ├── blender_manifest.toml      # Blender 4.2+ extension manifest specification
 ├── geometry.py                # Pure NumPy projection, spatial search, and angle math

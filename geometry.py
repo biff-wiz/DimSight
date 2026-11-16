@@ -203,15 +203,17 @@ def make_arc(origin, dir_a, dir_b, radius, segments=20):
 
 class Entry:
     """One measurable mesh: arrays plus its world matrix."""
-    __slots__ = ("co", "edges", "hide_v", "hide_e", "matrix", "obj")
+    __slots__ = ("co", "edges", "hide_v", "hide_e", "matrix", "obj", "faces", "edge_faces")
 
-    def __init__(self, co, edges, hide_v, hide_e, matrix, obj=None):
+    def __init__(self, co, edges, hide_v, hide_e, matrix, obj=None, faces=(), edge_faces=None):
         self.co = co
         self.edges = edges
         self.hide_v = hide_v
         self.hide_e = hide_e
         self.matrix = matrix
         self.obj = obj
+        self.faces = faces
+        self.edge_faces = edge_faces or {}
 
 
 class _Projection:
@@ -317,6 +319,47 @@ def _edge_world_point(cand):
 
 def _vertex_world(cand):
     return transform_points(cand.entry.matrix, cand.entry.co[cand.idx][None, :])[0]
+
+
+def face_bend_for_edge(entry, i0, i1):
+    """Return the unsigned angle between two face planes and their world polygons.
+
+    Face normals are aligned using each polygon's traversal of the shared edge, so a
+    reversed polygon winding does not turn a flat surface into a 180-degree bend.
+    Boundary, non-manifold, and degenerate faces have no result.
+    """
+    edge = (min(int(i0), int(i1)), max(int(i0), int(i1)))
+    face_indices = entry.edge_faces.get(edge, ())
+    if len(face_indices) != 2:
+        return None
+
+    polygons = []
+    normals = []
+    traversals = []
+    for face_index in face_indices:
+        face = tuple(int(index) for index in entry.faces[face_index])
+        traversal = []
+        for a, b in zip(face, face[1:] + face[:1]):
+            if a == edge[0] and b == edge[1]:
+                traversal.append(1)
+            elif a == edge[1] and b == edge[0]:
+                traversal.append(-1)
+        if len(traversal) != 1:
+            return None
+        points = transform_points(entry.matrix, entry.co[np.asarray(face, dtype=np.int64)])
+        if len(points) < 3:
+            return None
+        normal = np.sum(np.cross(points, np.roll(points, -1, axis=0)), axis=0)
+        length = float(np.linalg.norm(normal))
+        if length <= 1e-10:
+            return None
+        polygons.append(points)
+        normals.append(normal / length)
+        traversals.append(traversal[0])
+
+    if traversals[0] == traversals[1]:
+        normals[1] = -normals[1]
+    return angle_between(normals[0], normals[1]), polygons
 
 
 _PROBE_STEPS = np.array([0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 1.0])
@@ -433,7 +476,7 @@ def _angle_hit(cand, mouse, width, height, visible, prev_key):
     return {
         "mode": "angle", "origin": o_world, "p_a": wa, "p_b": wb,
         "angle": angle_between(d0, d1), "len_a": l0, "len_b": l1,
-        "pair_key": (head, idx, na, nb),
+        "pair_key": (head, idx, na, nb), "obj_name": head or "",
     }
 
 
@@ -461,7 +504,8 @@ def _zone_vertex(edge, mouse, threshold, fraction):
 
 
 def resolve_hover(entries, persp, width, height, mouse, threshold, endpoint_zone,
-                  want_angle, want_length, visible, prev_key=None):
+                  want_angle, want_length, visible, prev_key=None, want_face_angle=False,
+                  want_object_name=False):
     """Decide what the pointer is measuring.
 
     entries        iterable of Entry
@@ -511,11 +555,27 @@ def resolve_hover(entries, persp, width, height, mouse, threshold, endpoint_zone
             if hit is not None:
                 return hit
 
-    if best_edge is not None and want_length:
+    if best_edge is not None and want_face_angle:
+        measurement = face_bend_for_edge(
+            best_edge.entry, best_edge.i0, best_edge.i1)
+        if measurement is not None:
+            angle, polygons = measurement
+            entry = best_edge.entry
+            points = transform_points(
+               entry.matrix, entry.co[[best_edge.i0, best_edge.i1]])
+            return {
+               "mode": "face_angle", "p0": points[0], "p1": points[1],
+               "length": float(np.linalg.norm(points[1] - points[0])),
+               "angle": angle, "faces": polygons,
+               "obj_name": getattr(entry.obj, "name", "") or "",
+            }
+
+    if best_edge is not None and (want_length or want_object_name):
         entry = best_edge.entry
         p = transform_points(entry.matrix, entry.co[[best_edge.i0, best_edge.i1]])
-        return {"mode": "edge", "p0": p[0], "p1": p[1],
-                "length": float(np.linalg.norm(p[1] - p[0]))}
+        return {"mode": "edge" if want_length else "name", "p0": p[0], "p1": p[1],
+               "length": float(np.linalg.norm(p[1] - p[0])),
+               "obj_name": getattr(entry.obj, "name", "") or ""}
     return None
 
 

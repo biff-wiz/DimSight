@@ -34,6 +34,12 @@ _MODIFIER_FLAG = {"LEFT_SHIFT": "shift", "RIGHT_SHIFT": "shift", "LEFT_CTRL": "c
                   "RIGHT_CTRL": "ctrl", "LEFT_ALT": "alt", "RIGHT_ALT": "alt"}
 
 
+def _hold_is_relevant(props):
+    return not (
+        props.always_on and props.selected_display != "HOLD"
+        and not props.show_object_name)
+
+
 def clear_keymaps():
     for km, kmi in _keymaps:
         try:
@@ -117,7 +123,7 @@ class DIMSIGHT_OT_hold(bpy.types.Operator):
 
     def invoke(self, context, event):
         props = context.scene.dimsight
-        if props.always_on and props.selected_display != "HOLD":
+        if not _hold_is_relevant(props):
             return {"PASS_THROUGH"}   # nothing to peek at, leave the key alone
         if State.hold_running:
             return {"CANCELLED"}
@@ -159,8 +165,8 @@ class DIMSIGHT_OT_hold(bpy.types.Operator):
 
 class DIMSIGHT_OT_bind_key(bpy.types.Operator):
     bl_idname = "dimsight.bind_key"
-    bl_label = "Bind"
-    bl_description = "Press a key to use as the DimSight hold key"
+    bl_label = "Change Shortcut"
+    bl_description = "Choose a shared hold shortcut for Blender's 3D View, Object Mode, and Mesh keymaps"
 
     def invoke(self, context, event):
         context.window_manager.modal_handler_add(self)
@@ -179,52 +185,86 @@ class DIMSIGHT_OT_bind_key(bpy.types.Operator):
                 prefs.hold_key = event.type
             apply_keymaps(event.type)
             context.workspace.status_text_set(None)
-            self.report({"INFO"}, f"DimSight hold key: {event.type}")
+            conflicts = []
+            user_keyconfig = context.window_manager.keyconfigs.user
+            relevant_keymaps = {"3D View", "Object Mode", "Mesh"}
+            for keymap in user_keyconfig.keymaps:
+                if keymap.name not in relevant_keymaps:
+                    continue
+                for item in keymap.keymap_items:
+                    if (item.idname != "dimsight.hold" and item.type == event.type
+                            and item.value == "PRESS" and item.active
+                            and (item.any or not (
+                                item.shift or item.ctrl or item.alt or item.oskey))):
+                        conflicts.append(f"{keymap.name}: {item.name or item.idname}")
+            if conflicts:
+                more = f" (and {len(conflicts) - 1} more)" if len(conflicts) > 1 else ""
+                self.report(
+                    {"WARNING"},
+                    f"DimSight shortcut {event.type} may conflict with "
+                    f"{conflicts[0]}{more}; Blender keymaps were not changed")
+            else:
+                self.report({"INFO"}, f"DimSight shortcut: {event.type}")
             return {"FINISHED"}
         return {"RUNNING_MODAL"}
+
+
+def _save_defaults(context, prefs, save_preferences=None):
+    copy_settings(context.scene.dimsight, prefs)
+    context.preferences.is_dirty = True
+    result = (save_preferences or bpy.ops.wm.save_userpref)()
+    if "FINISHED" not in result:
+        raise RuntimeError("Blender did not finish saving user preferences")
 
 
 class DIMSIGHT_OT_save_defaults(bpy.types.Operator):
     bl_idname = "dimsight.save_defaults"
     bl_label = "Save as Default"
-    bl_description = "Save current DimSight settings as the global default for all future projects"
+    bl_description = "Save current scene's DimSight settings to Blender preferences as defaults for future scenes"
 
     def execute(self, context):
         prefs = get_prefs(context)
-        if prefs is not None:
-            copy_settings(context.scene.dimsight, prefs)
-            context.preferences.is_dirty = True
-            try:
-                bpy.ops.wm.save_userpref()
-            except Exception:
-                pass
-            self.report({"INFO"}, "DimSight settings saved as global defaults")
-        else:
-            self.report({"WARNING"}, "DimSight preferences not found")
+        if prefs is None:
+            self.report({"ERROR"}, "DimSight preferences are unavailable; defaults were not saved")
+            return {"CANCELLED"}
+        try:
+            _save_defaults(context, prefs)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not save DimSight defaults: {exc}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "DimSight defaults saved to Blender preferences")
         return {"FINISHED"}
 
 
 class DIMSIGHT_OT_restore_defaults(bpy.types.Operator):
     bl_idname = "dimsight.restore_defaults"
-    bl_label = "Restore Defaults"
-    bl_description = "Restore settings from your saved global defaults"
+    bl_label = "Apply Saved Defaults"
+    bl_description = "Copy the saved Blender preference defaults into the current scene"
 
     def execute(self, context):
         prefs = get_prefs(context)
-        if prefs is not None:
+        if prefs is None:
+            self.report({"ERROR"}, "DimSight preferences are unavailable; scene settings were not changed")
+            return {"CANCELLED"}
+        try:
             copy_settings(prefs, context.scene.dimsight)
-            overlay.invalidate()
-            overlay.tag_redraw_all()
-            self.report({"INFO"}, "DimSight settings restored from global defaults")
-        else:
-            self.report({"WARNING"}, "DimSight preferences not found")
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not apply DimSight defaults: {exc}")
+            return {"CANCELLED"}
+        overlay.invalidate()
+        overlay.tag_redraw_all()
+        overlay.refresh_hover(context)
+        self.report({"INFO"}, "Saved DimSight defaults applied to the current scene")
         return {"FINISHED"}
 
 
 class DIMSIGHT_OT_reset(bpy.types.Operator):
     bl_idname = "dimsight.reset"
-    bl_label = "Factory Reset"
-    bl_description = "Reset every DimSight setting back to original factory defaults"
+    bl_label = "Reset Scene Settings"
+    bl_description = "Reset DimSight settings in the current scene only; leaves the shortcut and Always On unchanged"
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
         props = context.scene.dimsight
@@ -233,7 +273,8 @@ class DIMSIGHT_OT_reset(bpy.types.Operator):
                 props.property_unset(prop.identifier)
         overlay.invalidate()
         overlay.tag_redraw_all()
-        self.report({"INFO"}, "DimSight settings reset to factory defaults")
+        overlay.refresh_hover(context)
+        self.report({"INFO"}, "Current scene's DimSight settings reset; Always On and the global shortcut were unchanged")
         return {"FINISHED"}
 
 
